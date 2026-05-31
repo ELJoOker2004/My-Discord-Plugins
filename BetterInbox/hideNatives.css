@@ -1,0 +1,5 @@
+[--tab]:not(.vc-betterinbox-our-tab),
+[--popout] [role="tab"]:not(.vc-betterinbox-our-tab),
+[--popout] [role="tablist"] > *:not(.vc-betterinbox-our-tab) {
+    display: none !important;
+}
