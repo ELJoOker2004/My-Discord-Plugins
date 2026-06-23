@@ -1,6 +1,6 @@
 # Discord Plugins
 
-Custom plugins for [Vencord](https://vencord.dev) and [Equicord](https://github.com/Equicord/Equicord).
+Custom plugins I wanted to use but didn't find for [Vencord](https://vencord.dev) and [Equicord](https://github.com/Equicord/Equicord), so I just created them.
 
 ## Plugins
 
