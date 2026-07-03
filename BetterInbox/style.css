@@ -10,6 +10,23 @@
     vertical-align: middle;
 }
 
+.vc-betterinbox-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    margin-left: 6px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 16px;
+    background: var(--status-danger);
+    color: #fff;
+    vertical-align: middle;
+}
+
 .vc-betterinbox-reply-quote {
     display: block;
     padding-left: 8px;

@@ -7,6 +7,11 @@
 import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
 
+// Filled in by index.tsx; avoids a circular import between settings and index
+export const settingsCallbacks = {
+    onHideNativeTabsChange: () => { }
+};
+
 export const settings = definePluginSettings({
     showAllTab: {
         type: OptionType.BOOLEAN,
@@ -31,7 +36,8 @@ export const settings = definePluginSettings({
     hideNativeTabs: {
         type: OptionType.BOOLEAN,
         description: "Hide Discord's native inbox tabs. Discord's @-mentions are merged into our tabs so you don't lose them.",
-        default: true
+        default: true,
+        onChange: () => settingsCallbacks.onHideNativeTabsChange()
     },
     includeDiscordMentions: {
         type: OptionType.BOOLEAN,
@@ -115,7 +121,7 @@ export const settings = definePluginSettings({
     },
     amountToKeep: {
         type: OptionType.NUMBER,
-        description: "Max entries to keep. 0 means unlimited.",
-        default: 0
+        description: "Max entries to keep. 0 means unlimited (large logs make saving slower).",
+        default: 200
     }
 });

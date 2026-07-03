@@ -104,7 +104,7 @@ function buildRecord(raw: RawMessage, kind: ActivityKind, meta?: ActivityMeta): 
     }
 }
 
-function persist() {
+function doPersist() {
     const toSave: StoredEntrySnapshot[] = activityLog.map(e => ({
         kind: e.kind,
         id: e.id,
@@ -115,16 +115,53 @@ function persist() {
     DataStore.set(LOG_KEY, toSave).catch(err => logger.error("persist failed", err));
 }
 
-export function markAllRead(): boolean {
+// Serializing the whole log on every event gets expensive with a large log,
+// so writes are coalesced. flushPersist() must run on plugin stop.
+let persistTimer: ReturnType<typeof setTimeout> | undefined;
+
+function persist() {
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+        persistTimer = undefined;
+        doPersist();
+    }, 800);
+}
+
+export function flushPersist() {
+    if (!persistTimer) return;
+    clearTimeout(persistTimer);
+    persistTimer = undefined;
+    doPersist();
+}
+
+function tabKindFilter(tabId: number): Set<ActivityKind> | null | undefined {
+    const cfg = TABS.find(t => t.id === tabId);
+    if (!cfg) return undefined;
+    return cfg.kinds === null ? null : new Set(cfg.kinds);
+}
+
+export function markTabRead(tabId: number): boolean {
+    const allowed = tabKindFilter(tabId);
+    if (allowed === undefined) return false;
     let changed = false;
     for (const e of activityLog) {
-        if (!e.read) {
+        if (!e.read && (allowed === null || allowed.has(e.kind))) {
             e.read = true;
             changed = true;
         }
     }
     if (changed) persist();
     return changed;
+}
+
+export function getUnreadCount(tabId: number): number {
+    const allowed = tabKindFilter(tabId);
+    if (allowed === undefined) return 0;
+    let count = 0;
+    for (const e of activityLog) {
+        if (!e.read && (allowed === null || allowed.has(e.kind))) count++;
+    }
+    return count;
 }
 
 export function markEntryRead(id: string, ack = false) {
@@ -240,6 +277,9 @@ function mentionsUser(message: RawMessage, userId: string): boolean {
 
 function handleSilentReply(message: RawMessage, selfId: string): boolean {
     if (!settings.store.includeReplies) return false;
+    // Only type 19 (REPLY): forwards and crossposts also carry a
+    // message_reference and would otherwise false-positive here.
+    if (message.type !== 19) return false;
     if (settings.store.ignoreSelf && message.author?.id === selfId) return false;
     if (settings.store.ignoreBots && message.author?.bot) return false;
     if (!isReplyToMe(message, selfId)) return false;
@@ -301,7 +341,11 @@ function handleMentionEdit(message: RawMessage, selfId: string): boolean {
     if (message.author?.id === selfId) return false;
     if (settings.store.ignoreBots && message.author?.bot) return false;
     if (!mentionsUser(message, selfId)) return false;
-    pushEntry("mention-edit", `edit:${message.id}:${editedTs}`, message);
+    const entryId = `edit:${message.id}:${editedTs}`;
+    if (activityLog.some(e => e.id === entryId)) return true;
+    // Keep only the latest edit entry per message instead of one per edit
+    activityLog = activityLog.filter(e => !e.id.startsWith(`edit:${message.id}:`));
+    pushEntry("mention-edit", entryId, message);
     return true;
 }
 

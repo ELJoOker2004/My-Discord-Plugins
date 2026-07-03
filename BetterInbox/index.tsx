@@ -9,7 +9,6 @@ import "./style.css";
 import { setStyleClassNames } from "@api/Styles";
 import { Button } from "@components/Button";
 import ErrorBoundary from "@components/ErrorBoundary";
-import { EquicordDevs } from "@utils/constants";
 import { classNameFactory } from "@utils/css";
 import { openPrivateChannel } from "@utils/discord";
 import { Logger } from "@utils/Logger";
@@ -20,7 +19,7 @@ import { findByCodeLazy, findCssClassesLazy } from "@webpack";
 import { ChannelRouter, ChannelStore, ContextMenuApi, GuildStore, IconUtils, Menu, MessageStore, NavigationRouter, ReadStateUtils, SelectedChannelStore, TabBar, Tooltip, useEffect, UserStore } from "@webpack/common";
 
 import hideNativesStyle from "./hideNatives.css?managed";
-import { settings } from "./settings";
+import { settings, settingsCallbacks } from "./settings";
 import {
     ActivityKind,
     ActivityMeta,
@@ -36,13 +35,15 @@ import {
 import {
     clearTab,
     deleteEntry,
+    flushPersist,
     getActivityLog,
     getDisplayMessages,
+    getUnreadCount,
     loadActivityLog,
     logSubscribers,
     makeSyntheticRaw,
-    markAllRead,
     markEntryRead,
+    markTabRead,
     notifyLogChange,
     processMessageCreate,
     processMessageUpdate,
@@ -82,6 +83,10 @@ function syncHideNatives() {
         ? { tab: tabClass.tab, popout: recentMentionsPopoutClass.recentMentionsPopout }
         : {});
 }
+
+settingsCallbacks.onHideNativeTabsChange = () => {
+    try { syncHideNatives(); } catch (err) { logger.error("syncHideNatives failed", err); }
+};
 
 function renderSyntheticContent(kind: ActivityKind, meta?: ActivityMeta) {
     if (kind === "reaction") {
@@ -230,7 +235,7 @@ function BetterInboxContent({ tabId, onJump, renderInboxMsg }: BetterInboxConten
     }, [forceUpdate]);
 
     useEffect(() => {
-        if (markAllRead()) forceUpdate();
+        if (markTabRead(tabId)) forceUpdate();
     }, [tabId, forceUpdate]);
 
     const snapshot = getDisplayMessages(tabId);
@@ -328,9 +333,10 @@ export default definePlugin({
     patches: [
         {
             find: "#{intl::UNREADS_TAB_LABEL})}",
+            group: true,
             replacement: [
                 {
-                    match: /#{intl::Fn6Odn::raw}\)\}\):null/,
+                    match: /#{intl::Fn6Odn::raw}\)\}\)\}\):null/,
                     replace: "$&,$self.renderTab(9),$self.renderTab(10),$self.renderTab(11),$self.renderTab(12)"
                 },
                 {
@@ -486,9 +492,11 @@ export default definePlugin({
         const cfg = TABS.find(t => t.id === id);
         if (!cfg || !settings.store[cfg.settingKey]) return null;
         if (getDisplayMessages(id).length === 0) return null;
+        const unread = getUnreadCount(id);
         return (
             <TabBar.Item key={id} className={classes(tabClass.tab, OUR_TAB_MARKER_CLASS)} id={id}>
                 {cfg.label}
+                {unread > 0 && <span className={cl("badge")}>{unread > 99 ? "99+" : unread}</span>}
             </TabBar.Item>
         );
     },
@@ -513,6 +521,8 @@ export default definePlugin({
     },
 
     stop() {
+        flushPersist();
         logSubscribers.clear();
+        userMessagedChannelIds.clear();
     }
 });
