@@ -10,6 +10,14 @@
     vertical-align: middle;
 }
 
+.vc-betterinbox-caught-up {
+    display: flex;
+    justify-content: center;
+    padding: 16px;
+    color: var(--text-muted);
+    font-size: 14px;
+}
+
 .vc-betterinbox-badge {
     display: inline-flex;
     align-items: center;

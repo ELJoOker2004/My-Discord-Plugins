@@ -80,11 +80,13 @@ export interface StoredEntry {
     id: string;
     raw: RawMessage;
     meta?: ActivityMeta;
-    record: InboxRecord;
+    /** Built lazily on first display; building thousands at startup blocks the app */
+    record?: InboxRecord;
+    recordFailed?: boolean;
     read?: boolean;
 }
 
-export type StoredEntrySnapshot = Omit<StoredEntry, "record">;
+export type StoredEntrySnapshot = Omit<StoredEntry, "record" | "recordFailed">;
 
 export interface TabConfig {
     id: number;

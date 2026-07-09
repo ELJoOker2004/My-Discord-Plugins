@@ -18,6 +18,17 @@ const LOG_KEY = "BetterInbox_log_v2";
 const RecentMentionsStore: { getMentions(): InboxRecord[]; } = findStoreLazy("RecentMentionsStore");
 const createMessageRecord: (raw: RawMessage) => InboxRecord = findByCodeLazy(".createFromServer(", ".isBlockedForMessage", "messageReference:");
 
+export function getNativeMentions(): InboxRecord[] {
+    try {
+        const native = RecentMentionsStore.getMentions();
+        return Array.isArray(native) ? native : [];
+    } catch (err) {
+        // The store find can fail if accessed before the inbox modules load
+        logger.warn("RecentMentionsStore unavailable", err);
+        return [];
+    }
+}
+
 export const TABS: TabConfig[] = [
     { id: 9, label: "All", settingKey: "showAllTab", kinds: null, includeDiscordMentions: true },
     { id: 10, label: "Mentions", settingKey: "showMentionsTab", kinds: ["reply", "blocked-mention", "mention-edit"], includeDiscordMentions: true },
@@ -102,6 +113,18 @@ function buildRecord(raw: RawMessage, kind: ActivityKind, meta?: ActivityMeta): 
         logger.error("createMessageRecord failed", err);
         return null;
     }
+}
+
+function ensureRecord(entry: StoredEntry): InboxRecord | null {
+    if (entry.record) return entry.record;
+    if (entry.recordFailed) return null;
+    const rec = buildRecord(entry.raw, entry.kind, entry.meta);
+    if (!rec) {
+        entry.recordFailed = true;
+        return null;
+    }
+    entry.record = rec;
+    return rec;
 }
 
 function doPersist() {
@@ -217,45 +240,77 @@ export function clearTab(tabId: number) {
     notifyLogChange();
 }
 
-function shouldDropForFilters(record: InboxRecord): boolean {
+function shouldDropForFilters(channelId: string, mentionEveryone: boolean, hasRoleMention: boolean, mentions: Array<{ id?: string; } | string> | undefined): boolean {
     if (settings.store.ignoreEveryoneAndRoleMentions) {
         const selfId = UserStore.getCurrentUser()?.id;
         if (selfId) {
-            const { mentionEveryone, mentionRoles, mentions } = record;
-            const hasRoleMention = Array.isArray(mentionRoles) && mentionRoles.length > 0;
-            const directlyMentioned = Array.isArray(mentions) && mentions.some((m: { id?: string; } | string) => (typeof m === "string" ? m : m.id) === selfId);
+            const directlyMentioned = Array.isArray(mentions) && mentions.some(m => (typeof m === "string" ? m : m.id) === selfId);
             if ((mentionEveryone || hasRoleMention) && !directlyMentioned) return true;
         }
     }
 
     if (settings.store.ignoreMutedServers) {
-        const guildId = ChannelStore.getChannel(record.channel_id)?.guild_id;
+        const guildId = ChannelStore.getChannel(channelId)?.guild_id;
         if (guildId && UserGuildSettingsStore.isMuted(guildId)) return true;
     }
 
     return false;
 }
 
-export function getDisplayMessages(tabId: number): InboxRecord[] {
-    const cfg = TABS.find(t => t.id === tabId);
-    if (!cfg) return [];
+function shouldDropEntry(e: StoredEntry): boolean {
+    const { raw } = e;
+    const hasRoleMention = Array.isArray(raw.mention_roles) && raw.mention_roles.length > 0;
+    return shouldDropForFilters(raw.channel_id, !!raw.mention_everyone, hasRoleMention, raw.mentions);
+}
 
-    let records: InboxRecord[];
+function shouldDropNative(rec: InboxRecord): boolean {
+    const hasRoleMention = Array.isArray(rec.mentionRoles) && rec.mentionRoles.length > 0;
+    return shouldDropForFilters(rec.channel_id, !!rec.mentionEveryone, hasRoleMention, rec.mentions as Array<{ id?: string; } | string>);
+}
+
+export function tabHasContent(tabId: number): boolean {
+    const cfg = TABS.find(t => t.id === tabId);
+    if (!cfg) return false;
     if (cfg.kinds === null) {
-        records = activityLog.map(e => e.record);
+        if (activityLog.length > 0) return true;
     } else {
         const allowed = new Set(cfg.kinds);
-        records = activityLog.filter(e => allowed.has(e.kind)).map(e => e.record);
+        if (activityLog.some(e => allowed.has(e.kind))) return true;
     }
-
     if (cfg.includeDiscordMentions && settings.store.includeDiscordMentions) {
-        const native = RecentMentionsStore.getMentions();
-        if (Array.isArray(native) && native.length) records = [...records, ...native];
+        return getNativeMentions().length > 0;
     }
+    return false;
+}
 
-    return records
-        .filter(r => !shouldDropForFilters(r))
-        .sort((a, b) => recordTimestamp(b) - recordTimestamp(a));
+export function getDisplayMessages(tabId: number, limit = Infinity): { messages: InboxRecord[]; total: number; } {
+    const cfg = TABS.find(t => t.id === tabId);
+    if (!cfg) return { messages: [], total: 0 };
+    const allowed = cfg.kinds === null ? null : new Set(cfg.kinds);
+
+    // Sort and filter on raw data; only the visible page gets turned into
+    // (expensive) message records via ensureRecord.
+    const items: Array<{ ts: number; entry?: StoredEntry; native?: InboxRecord; }> = [];
+    for (const e of activityLog) {
+        if (allowed && !allowed.has(e.kind)) continue;
+        if (shouldDropEntry(e)) continue;
+        items.push({ ts: entryTimestamp(e), entry: e });
+    }
+    if (cfg.includeDiscordMentions && settings.store.includeDiscordMentions) {
+        for (const rec of getNativeMentions()) {
+            if (shouldDropNative(rec)) continue;
+            items.push({ ts: recordTimestamp(rec), native: rec });
+        }
+    }
+    items.sort((a, b) => b.ts - a.ts);
+
+    const messages: InboxRecord[] = [];
+    for (const item of items) {
+        if (messages.length >= limit) break;
+        const rec = item.native ?? ensureRecord(item.entry!);
+        if (rec) messages.push(rec);
+    }
+    return { messages, total: items.length };
 }
 
 function isReplyToMe(message: RawMessage, selfId: string): boolean {
@@ -374,14 +429,13 @@ export async function loadActivityLog() {
     activityLog = [];
     for (const entry of raw) {
         if (!entry?.raw) continue;
-        const record = buildRecord(entry.raw, entry.kind, entry.meta);
-        if (!record) continue;
+        // Records are built lazily when first displayed (see ensureRecord);
+        // building them all here would block startup with large logs.
         activityLog.push({
             kind: entry.kind,
             id: entry.id,
             raw: entry.raw,
             meta: entry.meta,
-            record,
             read: !!entry.read
         });
     }

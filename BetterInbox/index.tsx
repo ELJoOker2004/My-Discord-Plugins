@@ -15,8 +15,8 @@ import { Logger } from "@utils/Logger";
 import { classes } from "@utils/misc";
 import { useForceUpdater } from "@utils/react";
 import definePlugin from "@utils/types";
-import { findByCodeLazy, findCssClassesLazy } from "@webpack";
-import { ChannelRouter, ChannelStore, ContextMenuApi, GuildStore, IconUtils, Menu, MessageStore, NavigationRouter, ReadStateUtils, SelectedChannelStore, TabBar, Tooltip, useEffect, UserStore } from "@webpack/common";
+import { findByCodeLazy, findCssClasses } from "@webpack";
+import { ChannelRouter, ChannelStore, ContextMenuApi, GuildStore, IconUtils, Menu, MessageStore, NavigationRouter, ReadStateUtils, SelectedChannelStore, TabBar, Tooltip, useEffect, UserStore, useState } from "@webpack/common";
 
 import hideNativesStyle from "./hideNatives.css?managed";
 import { settings, settingsCallbacks } from "./settings";
@@ -49,6 +49,7 @@ import {
     processMessageUpdate,
     pushEntry,
     shortenContent,
+    tabHasContent,
     TABS,
     userMessagedChannelIds,
     userToJson
@@ -61,9 +62,25 @@ const MIN_TAB_ID = 9;
 const MAX_TAB_ID = 12;
 const OUR_TAB_MARKER_CLASS = "vc-betterinbox-our-tab";
 
-const tabClass = findCssClassesLazy("inboxTitle", "tab");
-const recentMentionsPopoutClass = findCssClassesLazy("recentMentionsPopout", "scroller");
 const Popout = findByCodeLazy("getProTip", "canCloseAllMessages:");
+
+// Fresh (retried) finds instead of lazy proxies: touching a lazy CSS-classes
+// proxy before the inbox modules load would permanently cache an empty result.
+let tabClasses: Record<"inboxTitle" | "tab", string> | null = null;
+function getTabClass(): string | undefined {
+    if (!tabClasses?.tab) tabClasses = findCssClasses("inboxTitle", "tab");
+    return tabClasses.tab;
+}
+
+let popoutClasses: Record<"recentMentionsPopout" | "scroller", string> | null = null;
+function getPopoutClasses() {
+    if (!popoutClasses?.recentMentionsPopout) popoutClasses = findCssClasses("recentMentionsPopout", "scroller");
+    return popoutClasses;
+}
+
+function getPageSize() {
+    return Math.max(5, Number(settings.store.pageSize) || 25);
+}
 
 const SYNTHETIC_KINDS = new Set<ActivityKind>([
     "reaction", "thread-created", "pinned", "group-add",
@@ -78,10 +95,15 @@ interface InboxMsgProps {
     dismissible: boolean;
 }
 
+let appliedHideNativesSig = "";
 function syncHideNatives() {
-    setStyleClassNames(hideNativesStyle, settings.store.hideNativeTabs
-        ? { tab: tabClass.tab, popout: recentMentionsPopoutClass.recentMentionsPopout }
-        : {});
+    const tab = getTabClass();
+    const popout = getPopoutClasses().recentMentionsPopout;
+    const useMap = settings.store.hideNativeTabs && !!tab && !!popout;
+    const sig = useMap ? `${tab}|${popout}` : "off";
+    if (sig === appliedHideNativesSig) return;
+    appliedHideNativesSig = sig;
+    setStyleClassNames(hideNativesStyle, useMap ? { tab: tab!, popout: popout! } : {});
 }
 
 settingsCallbacks.onHideNativeTabsChange = () => {
@@ -224,6 +246,7 @@ interface BetterInboxContentProps {
 function BetterInboxContent({ tabId, onJump, renderInboxMsg }: BetterInboxContentProps) {
     const channel = ChannelStore.getChannel(SelectedChannelStore.getChannelId());
     const forceUpdate = useForceUpdater();
+    const [limit, setLimit] = useState(getPageSize);
 
     useEffect(() => {
         syncHideNatives();
@@ -238,7 +261,7 @@ function BetterInboxContent({ tabId, onJump, renderInboxMsg }: BetterInboxConten
         if (markTabRead(tabId)) forceUpdate();
     }, [tabId, forceUpdate]);
 
-    const snapshot = getDisplayMessages(tabId);
+    const { messages: snapshot, total } = getDisplayMessages(tabId, limit);
 
     const messageRender = (msg: InboxRecord, jump?: JumpFn) => {
         const owning = getActivityLog().find(e => e.record === msg);
@@ -280,20 +303,22 @@ function BetterInboxContent({ tabId, onJump, renderInboxMsg }: BetterInboxConten
     return (
         <Popout
             key={tabId}
-            className={classes(recentMentionsPopoutClass.recentMentionsPopout)}
-            scrollerClassName={classes(recentMentionsPopoutClass.scroller)}
+            className={getPopoutClasses().recentMentionsPopout}
+            scrollerClassName={getPopoutClasses().scroller}
             renderHeader={() => null}
             renderMessage={messageRender}
             channel={channel}
             onJump={onJump}
             onFetch={() => null}
             onCloseMessage={(id: string) => {
-                const entry = getActivityLog().find(e => e.record.id === id);
+                const entry = getActivityLog().find(e => e.raw.id === id);
                 if (entry) deleteEntry(entry.id);
             }}
-            loadMore={() => null}
             messages={snapshot}
-            renderEmptyState={() => null}
+            hasMore={total > limit}
+            loading={false}
+            loadMore={() => setLimit(l => l + getPageSize())}
+            renderEmptyState={() => <div className={cl("caught-up")}>You're all caught up!</div>}
             canCloseAllMessages={true}
         />
     );
@@ -489,16 +514,24 @@ export default definePlugin({
     },
 
     renderTab(id: number) {
-        const cfg = TABS.find(t => t.id === id);
-        if (!cfg || !settings.store[cfg.settingKey]) return null;
-        if (getDisplayMessages(id).length === 0) return null;
-        const unread = getUnreadCount(id);
-        return (
-            <TabBar.Item key={id} className={classes(tabClass.tab, OUR_TAB_MARKER_CLASS)} id={id}>
-                {cfg.label}
-                {unread > 0 && <span className={cl("badge")}>{unread > 99 ? "99+" : unread}</span>}
-            </TabBar.Item>
-        );
+        // A throw here would crash Discord's whole inbox popout (gray screen),
+        // so never let anything escape.
+        try {
+            const cfg = TABS.find(t => t.id === id);
+            if (!cfg || !settings.store[cfg.settingKey]) return null;
+            syncHideNatives();
+            if (!tabHasContent(id)) return null;
+            const unread = getUnreadCount(id);
+            return (
+                <TabBar.Item key={id} className={classes(getTabClass(), OUR_TAB_MARKER_CLASS)} id={id}>
+                    {cfg.label}
+                    {unread > 0 && <span className={cl("badge")}>{unread > 99 ? "99+" : unread}</span>}
+                </TabBar.Item>
+            );
+        } catch (err) {
+            logger.error("renderTab failed", err);
+            return null;
+        }
     },
 
     renderClearButton(tabId: number) {
@@ -510,14 +543,24 @@ export default definePlugin({
     },
 
     renderContent(tabId: number, onJump: JumpFn) {
-        return <WrappedBetterInboxContent tabId={tabId} onJump={onJump} renderInboxMsg={this.renderInboxMsg.bind(this)} />;
+        return <WrappedBetterInboxContent key={tabId} tabId={tabId} onJump={onJump} renderInboxMsg={this.renderInboxMsg.bind(this)} />;
     },
 
     deleteEntry,
 
     async start() {
-        await loadActivityLog();
-        syncHideNatives();
+        // start() must never throw: Equicord skips flux subscriptions and the
+        // managed style if it does.
+        try {
+            await loadActivityLog();
+        } catch (err) {
+            logger.error("loadActivityLog failed", err);
+        }
+        try {
+            syncHideNatives();
+        } catch (err) {
+            logger.error("syncHideNatives failed", err);
+        }
     },
 
     stop() {

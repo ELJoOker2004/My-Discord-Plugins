@@ -123,5 +123,10 @@ export const settings = definePluginSettings({
         type: OptionType.NUMBER,
         description: "Max entries to keep. 0 means unlimited (large logs make saving slower).",
         default: 200
+    },
+    pageSize: {
+        type: OptionType.NUMBER,
+        description: "Notifications shown per page. Scrolling down or pressing 'Load More' loads the next batch.",
+        default: 25
     }
 });
