@@ -18,6 +18,51 @@
     font-size: 14px;
 }
 
+.vc-betterinbox-load-more {
+    display: flex;
+    justify-content: center;
+    padding: 8px 12px 16px;
+}
+
+/* Row used for entries whose channel can't be resolved (friend requests etc.) */
+.vc-betterinbox-plain {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.vc-betterinbox-plain:hover {
+    background: var(--background-modifier-hover);
+}
+
+.vc-betterinbox-plain-avatar {
+    flex: 0 0 auto;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+}
+
+.vc-betterinbox-plain-body {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.vc-betterinbox-plain-name {
+    display: block;
+    color: var(--header-primary);
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.vc-betterinbox-plain-text {
+    color: var(--text-normal);
+    font-size: 14px;
+    overflow-wrap: break-word;
+}
+
 .vc-betterinbox-badge {
     display: inline-flex;
     align-items: center;

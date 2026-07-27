@@ -9,14 +9,16 @@ import "./style.css";
 import { setStyleClassNames } from "@api/Styles";
 import { Button } from "@components/Button";
 import ErrorBoundary from "@components/ErrorBoundary";
+import { DeleteIcon } from "@components/Icons";
 import { classNameFactory } from "@utils/css";
 import { openPrivateChannel } from "@utils/discord";
 import { Logger } from "@utils/Logger";
 import { classes } from "@utils/misc";
 import { useForceUpdater } from "@utils/react";
 import definePlugin from "@utils/types";
-import { findByCodeLazy, findCssClasses } from "@webpack";
-import { ChannelRouter, ChannelStore, ContextMenuApi, GuildStore, IconUtils, Menu, MessageStore, NavigationRouter, ReadStateUtils, SelectedChannelStore, TabBar, Tooltip, useEffect, UserStore, useState } from "@webpack/common";
+import type { ScrollerBaseRef } from "@vencord/discord-types";
+import { findCssClasses } from "@webpack";
+import { ChannelRouter, ChannelStore, ContextMenuApi, GuildStore, IconUtils, Menu, MessageStore, NavigationRouter, ReadStateUtils, ScrollerThin, TabBar, Tooltip, useEffect, useRef, UserStore, useState } from "@webpack/common";
 
 import hideNativesStyle from "./hideNatives.css?managed";
 import { settings, settingsCallbacks } from "./settings";
@@ -62,20 +64,20 @@ const MIN_TAB_ID = 9;
 const MAX_TAB_ID = 12;
 const OUR_TAB_MARKER_CLASS = "vc-betterinbox-our-tab";
 
-const Popout = findByCodeLazy("getProTip", "canCloseAllMessages:");
-
 // Fresh (retried) finds instead of lazy proxies: touching a lazy CSS-classes
 // proxy before the inbox modules load would permanently cache an empty result.
-let tabClasses: Record<"inboxTitle" | "tab", string> | null = null;
-function getTabClass(): string | undefined {
-    if (!tabClasses?.tab) tabClasses = findCssClasses("inboxTitle", "tab");
-    return tabClasses.tab;
+let tabClasses: Record<"inboxTitle" | "tab" | "tabLabel" | "tabBar", string> | null = null;
+function getTabClasses() {
+    if (!tabClasses?.tab) tabClasses = findCssClasses("inboxTitle", "tab", "tabLabel", "tabBar");
+    return tabClasses;
 }
 
-let popoutClasses: Record<"recentMentionsPopout" | "scroller", string> | null = null;
-function getPopoutClasses() {
-    if (!popoutClasses?.recentMentionsPopout) popoutClasses = findCssClasses("recentMentionsPopout", "scroller");
-    return popoutClasses;
+// Discord renamed these in July 2026: the old `recentMentionsPopout` module is
+// gone, the inbox list now lives in the `singleMessage`/`scroller` module.
+let messageClasses: Record<"singleMessage" | "scroller" | "box", string> | null = null;
+function getMessageClasses() {
+    if (!messageClasses?.scroller) messageClasses = findCssClasses("singleMessage", "scroller", "box");
+    return messageClasses;
 }
 
 function getPageSize() {
@@ -89,21 +91,21 @@ const SYNTHETIC_KINDS = new Set<ActivityKind>([
 
 type JumpFn = (...args: unknown[]) => void;
 
+// Discord's inbox message component now takes { message, onJump }; it used to
+// take { message, gotoMessage, dismissible } before the July 2026 rewrite.
 interface InboxMsgProps {
     message: InboxRecord;
-    gotoMessage: () => void;
-    dismissible: boolean;
+    onJump: JumpFn;
 }
 
 let appliedHideNativesSig = "";
 function syncHideNatives() {
-    const tab = getTabClass();
-    const popout = getPopoutClasses().recentMentionsPopout;
-    const useMap = settings.store.hideNativeTabs && !!tab && !!popout;
-    const sig = useMap ? `${tab}|${popout}` : "off";
+    const { tab, tabBar } = getTabClasses();
+    const useMap = settings.store.hideNativeTabs && !!tab;
+    const sig = useMap ? `${tab}|${tabBar}` : "off";
     if (sig === appliedHideNativesSig) return;
     appliedHideNativesSig = sig;
-    setStyleClassNames(hideNativesStyle, useMap ? { tab: tab!, popout: popout! } : {});
+    setStyleClassNames(hideNativesStyle, useMap ? { tab, tabBar: tabBar ?? tab } : {});
 }
 
 settingsCallbacks.onHideNativeTabsChange = () => {
@@ -237,6 +239,59 @@ function DoubleCheckmarkIcon() {
     );
 }
 
+interface ChannellessEntryProps {
+    msg: InboxRecord;
+    kind?: ActivityKind;
+    meta?: ActivityMeta;
+    onJump: () => void;
+    onDelete?: () => void;
+}
+
+// Discord's inbox row returns null when the message's channel isn't in the
+// store. Friend requests and friend-added entries deliberately carry the *user*
+// id in channel_id (jumpToInboxEntry opens the DM from it), so they resolve to
+// no channel and would render as blank rows. Those get a plain row of our own.
+function ChannellessEntry({ msg, kind, meta, onJump, onDelete }: ChannellessEntryProps) {
+    const { author } = msg;
+
+    let avatarUrl: string | undefined;
+    try {
+        avatarUrl = author && IconUtils.getUserAvatarURL(author, false, 40);
+    } catch {
+        try { avatarUrl = author && IconUtils.getDefaultAvatarURL(author.id); } catch { avatarUrl = undefined; }
+    }
+
+    const name = author?.globalName || author?.username || "Unknown User";
+    const body = kind && SYNTHETIC_KINDS.has(kind)
+        ? renderSyntheticContent(kind, meta)
+        : shortenContent(msg.content ?? "");
+
+    return (
+        <div className={cl("plain")} role="button" tabIndex={0} onClick={onJump}>
+            {avatarUrl && <img className={cl("plain-avatar")} src={avatarUrl} alt="" />}
+            <div className={cl("plain-body")}>
+                <span className={cl("plain-name")}>{name}</span>
+                <div className={cl("plain-text")}>{body}</div>
+            </div>
+            {onDelete && (
+                <Tooltip text="Delete">
+                    {({ onMouseLeave, onMouseEnter }) => (
+                        <Button
+                            variant="secondary"
+                            size="iconOnly"
+                            onMouseLeave={onMouseLeave}
+                            onMouseEnter={onMouseEnter}
+                            onClick={e => { e.stopPropagation(); onDelete(); }}
+                        >
+                            <DeleteIcon width={16} height={16} />
+                        </Button>
+                    )}
+                </Tooltip>
+            )}
+        </div>
+    );
+}
+
 interface BetterInboxContentProps {
     tabId: number;
     onJump: JumpFn;
@@ -244,9 +299,9 @@ interface BetterInboxContentProps {
 }
 
 function BetterInboxContent({ tabId, onJump, renderInboxMsg }: BetterInboxContentProps) {
-    const channel = ChannelStore.getChannel(SelectedChannelStore.getChannelId());
     const forceUpdate = useForceUpdater();
     const [limit, setLimit] = useState(getPageSize);
+    const scrollerRef = useRef<ScrollerBaseRef | null>(null);
 
     useEffect(() => {
         syncHideNatives();
@@ -262,8 +317,24 @@ function BetterInboxContent({ tabId, onJump, renderInboxMsg }: BetterInboxConten
     }, [tabId, forceUpdate]);
 
     const { messages: snapshot, total } = getDisplayMessages(tabId, limit);
+    // Compare against the page limit, not the rendered count: entries whose
+    // record fails to build are skipped, which would otherwise leave a
+    // "Load More" that can never load anything.
+    const hasMore = total > limit;
+    const loadMore = () => setLimit(l => l + getPageSize());
 
-    const messageRender = (msg: InboxRecord, jump?: JumpFn) => {
+    // Mirrors Discord's own inbox scroller: page in more once the user is
+    // within 250px of the bottom.
+    const onScroll = () => {
+        if (!hasMore) return;
+        try {
+            if ((scrollerRef.current?.getDistanceFromBottom() ?? Infinity) < 250) loadMore();
+        } catch (err) {
+            logger.error("onScroll failed", err);
+        }
+    };
+
+    const renderEntry = (msg: InboxRecord) => {
         const owning = getActivityLog().find(e => e.record === msg);
         if (owning) msg._betterInbox = { id: owning.id };
 
@@ -275,21 +346,26 @@ function BetterInboxContent({ tabId, onJump, renderInboxMsg }: BetterInboxConten
             if (body) msg.customRenderedContent = { content: body };
         }
 
-        const rendered = renderInboxMsg({
-            message: msg,
-            gotoMessage: (...args: unknown[]) => {
-                if (owning) markEntryRead(owning.id, false);
-                if (!owning) {
-                    jump?.(...args);
-                    return;
-                }
-                try { onJump?.(...args); } catch (err) { logger.error("onJump failed", err); }
-                jumpToInboxEntry(owning);
-            },
-            dismissible: true
-        });
+        const jump = (...args: unknown[]) => {
+            if (owning) markEntryRead(owning.id, false);
+            try { onJump?.(...args); } catch (err) { logger.error("onJump failed", err); }
+            if (owning) jumpToInboxEntry(owning);
+        };
 
-        return [
+        // Entries without a resolvable channel render as nothing in Discord's
+        // own row component, so fall back to a plain row for those.
+        const hasChannel = !!msg.channel_id && !!ChannelStore.getChannel(msg.channel_id);
+        const rendered = hasChannel
+            ? renderInboxMsg({ message: msg, onJump: jump })
+            : <ChannellessEntry
+                msg={msg}
+                kind={kind}
+                meta={meta}
+                onJump={jump}
+                onDelete={owning && (() => deleteEntry(owning.id))}
+            />;
+
+        return (
             <div
                 key={msg.id}
                 className={classes(cl("entry"), kind ? cl(`entry-${kind}`) : "")}
@@ -297,30 +373,28 @@ function BetterInboxContent({ tabId, onJump, renderInboxMsg }: BetterInboxConten
             >
                 {rendered}
             </div>
-        ];
+        );
     };
 
+    if (snapshot.length === 0) {
+        return <div className={cl("caught-up")}>You're all caught up!</div>;
+    }
+
     return (
-        <Popout
-            key={tabId}
-            className={getPopoutClasses().recentMentionsPopout}
-            scrollerClassName={getPopoutClasses().scroller}
-            renderHeader={() => null}
-            renderMessage={messageRender}
-            channel={channel}
-            onJump={onJump}
-            onFetch={() => null}
-            onCloseMessage={(id: string) => {
-                const entry = getActivityLog().find(e => e.raw.id === id);
-                if (entry) deleteEntry(entry.id);
-            }}
-            messages={snapshot}
-            hasMore={total > limit}
-            loading={false}
-            loadMore={() => setLimit(l => l + getPageSize())}
-            renderEmptyState={() => <div className={cl("caught-up")}>You're all caught up!</div>}
-            canCloseAllMessages={true}
-        />
+        <ScrollerThin
+            ref={scrollerRef}
+            className={getMessageClasses().scroller}
+            onScroll={onScroll}
+        >
+            {snapshot.map(renderEntry)}
+            {hasMore && (
+                <div className={cl("load-more")}>
+                    <Button variant="secondary" size="small" onClick={loadMore}>
+                        Load More
+                    </Button>
+                </div>
+            )}
+        </ScrollerThin>
     );
 }
 
@@ -355,6 +429,10 @@ export default definePlugin({
     settings,
     managedStyle: hideNativesStyle,
 
+    // Discord merged the inbox tab bar and the inbox message renderer into a
+    // single module in July 2026, so all five replacements now share one find.
+    // The old second group (find: ".guildFilter:null") no longer matches
+    // anything, and the renderer's `gotoMessage` prop is now `onJump`.
     patches: [
         {
             find: "#{intl::UNREADS_TAB_LABEL})}",
@@ -371,14 +449,9 @@ export default definePlugin({
                 {
                     match: /:(\i)===\i\.\i\.MENTIONS\?\(0,.{0,500}onJump:(\i)}\)/,
                     replace: `: ($1 >= ${MIN_TAB_ID} && $1 <= ${MAX_TAB_ID}) ? $self.renderContent($1, $2) $&`
-                }
-            ]
-        },
-        {
-            find: ".guildFilter:null",
-            replacement: [
+                },
                 {
-                    match: /function (\i)\(\i\){let{message:\i,gotoMessage/,
+                    match: /function (\i)\(\i\){let\{message:\i,onJump/,
                     replace: "$self.renderInboxMsg = $1; $&"
                 },
                 {
@@ -522,9 +595,10 @@ export default definePlugin({
             syncHideNatives();
             if (!tabHasContent(id)) return null;
             const unread = getUnreadCount(id);
+            const { tab, tabLabel } = getTabClasses();
             return (
-                <TabBar.Item key={id} className={classes(getTabClass(), OUR_TAB_MARKER_CLASS)} id={id}>
-                    {cfg.label}
+                <TabBar.Item key={id} className={classes(tab, OUR_TAB_MARKER_CLASS)} id={id}>
+                    <span className={tabLabel}>{cfg.label}</span>
                     {unread > 0 && <span className={cl("badge")}>{unread > 99 ? "99+" : unread}</span>}
                 </TabBar.Item>
             );
@@ -538,6 +612,7 @@ export default definePlugin({
         return <ClearButton tabId={tabId} />;
     },
 
+    // Overwritten by the patch above with Discord's own inbox message component
     renderInboxMsg(_props: InboxMsgProps): React.ReactNode {
         return null;
     },
