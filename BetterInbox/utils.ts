@@ -105,7 +105,16 @@ function recordTimestamp(rec: InboxRecord): number {
 
 function buildRecord(raw: RawMessage, kind: ActivityKind, meta?: ActivityMeta): InboxRecord | null {
     try {
-        const rec = createMessageRecord(raw);
+        const ref = raw.message_reference ?? raw.messageReference;
+        const targetRaw = (kind === "reaction" || kind === "thread-created" || kind === "pinned") && ref?.message_id
+            ? {
+                ...raw,
+                id: ref.message_id,
+                channel_id: ref.channel_id ?? raw.channel_id,
+                guild_id: ref.guild_id ?? raw.guild_id
+            }
+            : raw;
+        const rec = createMessageRecord(targetRaw);
         rec._betterInboxKind = kind;
         if (meta) rec._betterInboxMeta = meta;
         return rec;
@@ -168,7 +177,7 @@ export function markTabRead(tabId: number): boolean {
     if (allowed === undefined) return false;
     let changed = false;
     for (const e of activityLog) {
-        if (!e.read && (allowed === null || allowed.has(e.kind))) {
+        if (!e.read && !shouldDropEntry(e) && (allowed === null || allowed.has(e.kind))) {
             e.read = true;
             changed = true;
         }
@@ -182,7 +191,7 @@ export function getUnreadCount(tabId: number): number {
     if (allowed === undefined) return 0;
     let count = 0;
     for (const e of activityLog) {
-        if (!e.read && (allowed === null || allowed.has(e.kind))) count++;
+        if (!e.read && !shouldDropEntry(e) && (allowed === null || allowed.has(e.kind))) count++;
     }
     return count;
 }
@@ -272,13 +281,13 @@ export function tabHasContent(tabId: number): boolean {
     const cfg = TABS.find(t => t.id === tabId);
     if (!cfg) return false;
     if (cfg.kinds === null) {
-        if (activityLog.length > 0) return true;
+        if (activityLog.some(e => !shouldDropEntry(e))) return true;
     } else {
         const allowed = new Set(cfg.kinds);
-        if (activityLog.some(e => allowed.has(e.kind))) return true;
+        if (activityLog.some(e => allowed.has(e.kind) && !shouldDropEntry(e))) return true;
     }
     if (cfg.includeDiscordMentions && settings.store.includeDiscordMentions) {
-        return getNativeMentions().length > 0;
+        return getNativeMentions().some(rec => !shouldDropNative(rec));
     }
     return false;
 }
@@ -307,7 +316,7 @@ export function getDisplayMessages(tabId: number, limit = Infinity): { messages:
     const messages: InboxRecord[] = [];
     for (const item of items) {
         if (messages.length >= limit) break;
-        const rec = item.native ?? ensureRecord(item.entry!);
+        const rec = item.native ?? (item.entry ? ensureRecord(item.entry) : null);
         if (rec) messages.push(rec);
     }
     return { messages, total: items.length };
@@ -368,7 +377,7 @@ function handleForumReply(message: RawMessage, selfId: string): boolean {
 function handlePinSystemMessage(message: RawMessage, selfId: string): boolean {
     if (!settings.store.includePins) return false;
     if (message.type !== 6) return false;
-    const ref = message.message_reference;
+    const ref = message.message_reference ?? message.messageReference;
     if (!ref?.message_id) return false;
     const pinned = MessageStore.getMessage(ref.channel_id ?? message.channel_id, ref.message_id);
     if (!pinned) return false;

@@ -1,4 +1,4 @@
 [--tab]:not(.vc-betterinbox-our-tab),
 [--tabBar] [role="tab"]:not(.vc-betterinbox-our-tab) {
-    display: none !important;
+    display: none !important; /* Override Discord's tab display while native tabs are hidden. */
 }

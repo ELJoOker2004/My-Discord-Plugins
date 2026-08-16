@@ -181,7 +181,7 @@ function jumpToInboxEntry(owning: StoredEntry) {
 
     let { channel_id: channelId, id: messageId, guild_id: guildId } = raw;
 
-    const ref = raw.message_reference;
+    const ref = raw.message_reference ?? raw.messageReference;
     if ((kind === "reaction" || kind === "thread-created" || kind === "pinned") && ref?.channel_id && ref.message_id) {
         channelId = ref.channel_id;
         messageId = ref.message_id;
@@ -207,7 +207,7 @@ function openEntryContextMenu(event: React.MouseEvent, msg: InboxRecord, owning?
             <Menu.MenuItem
                 id="vc-bi-mark-read"
                 label="Mark as Read"
-                disabled={!channel}
+                disabled={!channel && !owning}
                 action={() => {
                     if (channel) {
                         try { ReadStateUtils.ackChannel(channel); }
@@ -267,7 +267,17 @@ function ChannellessEntry({ msg, kind, meta, onJump, onDelete }: ChannellessEntr
         : shortenContent(msg.content ?? "");
 
     return (
-        <div className={cl("plain")} role="button" tabIndex={0} onClick={onJump}>
+        <div
+            className={cl("plain")}
+            role="button"
+            tabIndex={0}
+            onClick={onJump}
+            onKeyDown={event => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                onJump();
+            }}
+        >
             {avatarUrl && <img className={cl("plain-avatar")} src={avatarUrl} alt="" />}
             <div className={cl("plain-body")}>
                 <span className={cl("plain-name")}>{name}</span>
@@ -367,7 +377,7 @@ function BetterInboxContent({ tabId, onJump, renderInboxMsg }: BetterInboxConten
 
         return (
             <div
-                key={msg.id}
+                key={owning?.id ?? msg.id}
                 className={classes(cl("entry"), kind ? cl(`entry-${kind}`) : "")}
                 onContextMenu={(e: React.MouseEvent) => openEntryContextMenu(e, msg, owning)}
             >
@@ -402,7 +412,7 @@ const WrappedBetterInboxContent = ErrorBoundary.wrap(BetterInboxContent, { noop:
 
 function ClearButtonBase({ tabId }: { tabId: number; }) {
     const cfg = TABS.find(t => t.id === tabId);
-    const tooltipText = !cfg || cfg.kinds === null ? "Clear All" : `Clear ${cfg.label}`;
+    const tooltipText = !cfg || cfg.kinds === null ? "Clear captured entries" : `Clear captured ${cfg.label}`;
     return (
         <Tooltip text={tooltipText}>
             {({ onMouseLeave, onMouseEnter }) => (
@@ -423,24 +433,32 @@ const ClearButton = ErrorBoundary.wrap(ClearButtonBase, { noop: true });
 
 export default definePlugin({
     name: "BetterInbox",
-    description: "Replaces Discord's inbox with multiple tabs that capture replies, reactions, threads, pins, edits, blocked mentions, group invites, friend requests, scheduled events, and Discord's native @-mentions. Each capture type is toggleable.",
+    description: "Adds inbox tabs that capture replies, reactions, threads, pins, edits, blocked mentions, group invites, friend requests, scheduled events, and native @-mentions while keeping Discord's Bookmarks and Reminders available.",
     authors: [{ name: "ELJoOker", id: 605894319408283678n }],
     tags: ["Notifications", "Chat"],
     settings,
     managedStyle: hideNativesStyle,
 
     // Discord merged the inbox tab bar and the inbox message renderer into a
-    // single module in July 2026, so all five replacements now share one find.
+    // single module in July 2026, so all replacements now share one find.
     // The old second group (find: ".guildFilter:null") no longer matches
     // anything, and the renderer's `gotoMessage` prop is now `onJump`.
     patches: [
         {
-            find: "#{intl::UNREADS_TAB_LABEL})}",
+            find: "#{intl::UNREADS_TAB_LABEL}),className:",
             group: true,
             replacement: [
                 {
                     match: /#{intl::Fn6Odn::raw}\)\}\)\}\):null/,
                     replace: "$&,$self.renderTab(9),$self.renderTab(10),$self.renderTab(11),$self.renderTab(12)"
+                },
+                {
+                    match: /(id:\i\.\i\.BOOKMARKS,className:)(\i\.\i)/,
+                    replace: "$1$self.showNativeTab($2)"
+                },
+                {
+                    match: /(id:\i\.\i\.REMINDERS,className:)(\i\.\i)/,
+                    replace: "$1$self.showNativeTab($2)"
                 },
                 {
                     match: /:(\i)===\i\.\i\.MENTIONS\?\(0,.{0,500}null}/,
@@ -606,6 +624,10 @@ export default definePlugin({
             logger.error("renderTab failed", err);
             return null;
         }
+    },
+
+    showNativeTab(className: string) {
+        return classes(className, OUR_TAB_MARKER_CLASS);
     },
 
     renderClearButton(tabId: number) {

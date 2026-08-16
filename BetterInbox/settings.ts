@@ -35,7 +35,7 @@ export const settings = definePluginSettings({
     },
     hideNativeTabs: {
         type: OptionType.BOOLEAN,
-        description: "Hide Discord's native inbox tabs. Discord's @-mentions are merged into our tabs so you don't lose them.",
+        description: "Hide Discord's Unreads, Mentions, and Scheduled tabs. Bookmarks and Reminders stay available alongside BetterInbox.",
         default: true,
         onChange: () => settingsCallbacks.onHideNativeTabsChange()
     },
