@@ -1,0 +1,180 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+.vc-pvm-player {
+    position: relative;
+    display: flex;
+    flex: 0 1 560px;
+    align-items: center;
+    gap: 4px;
+    min-width: 330px;
+    max-width: min(560px, 48vw);
+    height: 36px;
+    margin: 0 6px;
+    padding: 0 5px;
+    overflow: hidden;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md, 10px);
+    background: var(--background-surface-high);
+    box-shadow: var(--shadow-low);
+    color: var(--text-default);
+    animation: vc-pvm-enter 180ms ease-out;
+}
+
+.vc-pvm-player::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    background: var(--brand-500);
+}
+
+.vc-pvm-voice-icon {
+    position: relative;
+    display: grid;
+    flex: 0 0 28px;
+    width: 28px;
+    height: 28px;
+    margin-left: 2px;
+    place-items: center;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--brand-500) 18%, transparent);
+    color: var(--brand-500);
+}
+
+.vc-pvm-player-playing .vc-pvm-voice-icon::after {
+    content: "";
+    position: absolute;
+    inset: -2px;
+    border: 2px solid color-mix(in srgb, var(--brand-500) 45%, transparent);
+    border-radius: 50%;
+    animation: vc-pvm-pulse 1.4s ease-out infinite;
+}
+
+.vc-pvm-control {
+    flex: 0 0 28px;
+    width: 28px;
+    height: 28px;
+}
+
+.vc-pvm-origin {
+    flex: 0 1 112px;
+    justify-content: flex-start;
+    min-width: 76px;
+    padding: 2px 5px;
+}
+
+.vc-pvm-origin-copy {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    align-items: flex-start;
+    line-height: 1.15;
+}
+
+.vc-pvm-title,
+.vc-pvm-channel {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.vc-pvm-title {
+    color: var(--text-default);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.vc-pvm-channel {
+    color: var(--text-muted);
+    font-size: 10px;
+}
+
+.vc-pvm-timeline {
+    display: flex;
+    flex: 1 1 220px;
+    align-items: center;
+    gap: 7px;
+    min-width: 120px;
+}
+
+.vc-pvm-seek {
+    flex: 1 1 auto;
+    min-width: 80px;
+}
+
+.vc-pvm-time {
+    min-width: 34px;
+    color: var(--text-muted);
+    font-family: var(--font-code);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+}
+
+.vc-pvm-speed {
+    flex: 0 0 auto;
+    min-width: 34px;
+    color: var(--brand-500);
+    font-weight: 700;
+}
+
+.vc-pvm-close {
+    color: var(--interactive-normal);
+}
+
+@keyframes vc-pvm-enter {
+    from {
+        opacity: 0;
+        transform: translateY(-4px) scale(.98);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+@keyframes vc-pvm-pulse {
+    from {
+        opacity: .65;
+        transform: scale(.85);
+    }
+
+    to {
+        opacity: 0;
+        transform: scale(1.25);
+    }
+}
+
+@media (width <= 1050px) {
+    .vc-pvm-player {
+        max-width: 410px;
+    }
+
+    .vc-pvm-origin {
+        display: none;
+    }
+}
+
+@media (width <= 760px) {
+    .vc-pvm-player {
+        min-width: 235px;
+        max-width: 300px;
+    }
+
+    .vc-pvm-time:last-child,
+    .vc-pvm-voice-icon {
+        display: none;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .vc-pvm-player,
+    .vc-pvm-player-playing .vc-pvm-voice-icon::after {
+        animation: none;
+    }
+}

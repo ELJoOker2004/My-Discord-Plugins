@@ -13,5 +13,8 @@ Adds a toggle button to your user area that lets you appear deafened in voice ch
 ### [MultiForward](./multiforward)
 Lets you select multiple messages and forward them all at once. Includes configurable per-message delays, cooldown bursts, and jitter to avoid rate limits.
 
+### [PersistentVoiceMessages](./PersistentVoiceMessages)
+Keeps voice messages playing when you switch channels or direct messages. Adds a responsive mini player to Discord's channel toolbar with live progress, play/pause, seeking, playback speed, source-chat navigation, and synchronized native waveform animation when you return.
+
 ## Installation
 Copy the plugin folder into your Vencord/Equicord `src/userplugins` directory and rebuild.
