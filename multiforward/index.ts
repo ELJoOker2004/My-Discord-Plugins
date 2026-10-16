@@ -1,226 +1,217 @@
-import definePlugin, { OptionType } from "@utils/types";
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 import { definePluginSettings } from "@api/Settings";
-import { findByProps } from "@webpack";
+import { EquicordDevs } from "@utils/constants";
+import { Logger } from "@utils/Logger";
+import definePlugin, { OptionType } from "@utils/types";
+import type { Message } from "@vencord/discord-types";
+import { MessageStore, showToast, Toasts, useState } from "@webpack/common";
 
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-declare global {
-    interface Window {
-        __multiForwardSelection?: {
-            channelId: string;
-            startId: string;
-            endId: string;
-        } | null;
-    }
+interface ForwardSelection {
+    channelId: string;
+    ids: string[];
 }
 
+interface ForwardOptions {
+    onlyAttachmentIds?: string[];
+    onlyEmbedIndices?: number[];
+    withMessage?: string;
+    [key: string]: unknown;
+}
+
+interface ForwardActions {
+    sendForwards(message: Message, destinations: string[], options?: ForwardOptions): Promise<PromiseSettledResult<unknown>[]>;
+}
+
+const logger = new Logger("MultiForward");
 const settings = definePluginSettings({
     baseDelay: {
         type: OptionType.NUMBER,
-        description: "Base Delay (ms): The default delay between sending each message.",
+        description: "The delay between forwarding each message in milliseconds.",
         default: 2500
     },
     randomizeDelay: {
         type: OptionType.NUMBER,
-        description: "Randomizer Jitter (ms): Adds or subtracts a random amount up to this value.",
+        description: "Adds or subtracts a random delay up to this many milliseconds.",
         default: 500
     },
     cooldownCount: {
         type: OptionType.NUMBER,
-        description: "Messages Before Cooldown: Trigger an extra delay after sending this many messages. Set to 0 to disable.",
+        description: "Pause after this many messages. Set to 0 to disable.",
         default: 5
     },
     cooldownDelay: {
         type: OptionType.NUMBER,
-        description: "Cooldown Delay (ms): The additional time to wait during a cooldown pause.",
+        description: "The additional cooldown delay in milliseconds.",
         default: 5000
     }
 });
 
-let MessageActions: any;
-let MessageStore: any;
-let origSendMessage: any;
-let selectionHandler: () => void;
+let selectedRange: ForwardSelection | null = null;
+let preserveSelection = false;
+let lifecycle: AbortController | undefined;
+
+function readSelection(): ForwardSelection | null {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
+
+    const range = selection.getRangeAt(0);
+    const messages = Array.from(document.querySelectorAll('[id^="chat-messages-"]'))
+        .filter(element => range.intersectsNode(element))
+        .map(element => element.id.match(/^chat-messages-(\d+)-(\d+)$/))
+        .filter((match): match is RegExpMatchArray => match !== null);
+    const channelId = messages[0]?.[1];
+    if (!channelId || messages.some(match => match[1] !== channelId)) return null;
+    const ids = [...new Set(messages.map(match => match[2]))]
+        .sort((a, b) => BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0);
+    return ids.length > 1 ? { channelId, ids } : null;
+}
+
+function selectionChanged() {
+    const selection = readSelection();
+    if (selection || !preserveSelection) selectedRange = selection;
+}
+
+function pointerDown(event: PointerEvent) {
+    const { target } = event;
+    preserveSelection = event.button === 2 || target instanceof Element && !!target.closest('button, [role="button"], [role="menu"], [role="menuitem"], [role="dialog"]');
+    selectedRange = preserveSelection ? readSelection() ?? selectedRange : null;
+}
+
+function keyDown(event: KeyboardEvent) {
+    if (event.key === "Escape") {
+        selectedRange = null;
+        preserveSelection = false;
+    } else if (event.key === "Tab") {
+        preserveSelection = true;
+    }
+}
+
+function wait(ms: number, signal: AbortSignal) {
+    signal.throwIfAborted();
+    return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+            signal.removeEventListener("abort", abort);
+            resolve();
+        }, ms);
+        function abort() {
+            clearTimeout(timer);
+            reject(signal.reason);
+        }
+        signal.addEventListener("abort", abort, { once: true });
+    });
+}
 
 export default definePlugin({
     name: "MultiForward",
-    description: "Forwards multiple selected messages. Note: it's not recommended to send more than 6-10 messages at once or you will need to increase the delays",
+    description: "Highlight multiple messages, then use Forward on a message in the selection to forward them in order.",
     authors: [EquicordDevs.ELJoOker],
     settings,
+    patches: [{
+        find: "customValidateDestination:",
+        group: true,
+        replacement: [
+            {
+                match: /(?<=function \i\((\i)\)\{)(?=let\{[^}]{0,350}customValidateDestination:)/,
+                replace: "const multiForward=$self.useSelection($1);"
+            },
+            {
+                match: /(\i)\.sendForwards\(/,
+                replace: "$self.forwardMessages($1,multiForward,"
+            },
+            {
+                match: /(?<=[{,]title:)(\i)(?=\?\?)/,
+                replace: "$self.getTitle($1,multiForward)"
+            }
+        ]
+    }],
+
+    useSelection({ message, customSendHandler }: { message?: Message; customSendHandler?: unknown; }) {
+        const [selection] = useState(() => {
+            const range = readSelection() ?? selectedRange;
+            return !customSendHandler && message && range?.channelId === message.channel_id && range.ids.includes(message.id)
+                ? range : null;
+        });
+        return selection;
+    },
+
+    getTitle(title: string | undefined, selection: ForwardSelection | null) {
+        return title ?? (selection ? `Forward ${selection.ids.length} messages` : undefined);
+    },
+
+    async forwardMessages(actions: ForwardActions, selection: ForwardSelection | null, message: Message, destinations: string[], options?: ForwardOptions) {
+        const signal = lifecycle?.signal;
+        if (!selection || !signal || signal.aborted) return actions.sendForwards(message, destinations, options);
+        selectedRange = null;
+        const { ids, channelId } = selection;
+        const { baseDelay, randomizeDelay, cooldownCount, cooldownDelay } = settings.store;
+        let sent = 0;
+        showToast(`Forwarding ${ids.length} selected messages...`, Toasts.Type.MESSAGE);
+        const results = await Promise.allSettled(destinations.map(async destination => {
+            let value: unknown;
+            for (let index = 0; index < ids.length; index++) {
+                signal.throwIfAborted();
+                const id = ids[index];
+                const selected = MessageStore.getMessage(channelId, id) ?? (id === message.id ? message : undefined);
+                if (!selected) throw new Error("A selected message is no longer available.");
+                const nextOptions = { ...options };
+                if (id !== message.id) {
+                    delete nextOptions.onlyAttachmentIds;
+                    delete nextOptions.onlyEmbedIndices;
+                }
+                if (index < ids.length - 1) delete nextOptions.withMessage;
+                const [result] = await actions.sendForwards(selected, [destination], nextOptions);
+                if (result.status === "rejected") throw result.reason;
+                value = result.value;
+                sent++;
+                if (index < ids.length - 1) {
+                    const jitter = Math.max(0, Number(randomizeDelay) || 0);
+                    const offset = Math.floor(Math.random() * (jitter * 2 + 1)) - jitter;
+                    const cooldown = cooldownCount > 0 && (index + 1) % cooldownCount === 0 ? Math.max(0, Number(cooldownDelay) || 0) : 0;
+                    await wait(Math.max(0, (Number(baseDelay) || 0) + offset) + cooldown, signal);
+                }
+            }
+            return value;
+        }));
+        if (!signal.aborted) {
+            if (results.every(result => result.status === "fulfilled")) {
+                showToast(`Forwarded ${sent} messages.`, Toasts.Type.SUCCESS);
+            } else {
+                const status = `Forwarded ${sent} of ${ids.length * destinations.length} messages. Forwarding stopped for failed destinations.`;
+                logger.error(status);
+                showToast(status, Toasts.Type.FAILURE);
+            }
+        }
+        return results;
+    },
 
     start() {
-        console.log("[MultiForward] Plugin started! Operating in Strict React/Store mode.");
-        window.__multiForwardSelection = null;
+        lifecycle = new AbortController();
+        selectedRange = null;
+        preserveSelection = false;
+        document.addEventListener("selectionchange", selectionChanged);
+        document.addEventListener("pointerdown", pointerDown, true);
+        document.addEventListener("keydown", keyDown, true);
+    },
 
-        selectionHandler = () => {
-            const selection = window.getSelection();
-            
-            // If the user un-highlighted the text...
-            if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
-                // Check if they lost the highlight because they clicked into the Forward Modal
-                const activeEl = document.activeElement;
-                if (activeEl && (activeEl.closest('[role="dialog"]') || activeEl.closest('[class*="modal"]'))) {
-                    return; // They are in the modal, KEEP the selection alive!
-                }
-                
-                // Otherwise, they just clicked the chat background. Clear the multi-forward cache.
-                window.__multiForwardSelection = null;
-                return;
-            }
-
-            let anchorNode = selection.anchorNode;
-            let focusNode = selection.focusNode;
-
-            if (anchorNode?.nodeType === Node.TEXT_NODE) anchorNode = anchorNode.parentNode;
-            if (focusNode?.nodeType === Node.TEXT_NODE) focusNode = focusNode.parentNode;
-
-            const anchorEl = (anchorNode as Element)?.closest?.('[id^="chat-messages-"]');
-            const focusEl = (focusNode as Element)?.closest?.('[id^="chat-messages-"]');
-
-            if (anchorEl && focusEl) {
-                const anchorParts = anchorEl.id.split('-');
-                const focusParts = focusEl.id.split('-');
-                
-                if (anchorParts.length >= 4 && focusParts.length >= 4) {
-                    const channelId = anchorParts[2];
-                    const id1 = BigInt(anchorParts[3]);
-                    const id2 = BigInt(focusParts[3]);
-
-                    // If they only highlighted text inside ONE single message, don't trigger multi-forward
-                    if (id1 === id2) {
-                        window.__multiForwardSelection = null;
-                        return;
-                    }
-
-                    const startId = id1 < id2 ? id1 : id2;
-                    const endId = id1 > id2 ? id1 : id2;
-
-                    window.__multiForwardSelection = {
-                        channelId,
-                        startId: startId.toString(),
-                        endId: endId.toString()
-                    };
-                } else {
-                    window.__multiForwardSelection = null;
-                }
-            } else {
-                window.__multiForwardSelection = null;
-            }
-        };
-
-        // Listen to native browser selection changes
-        document.addEventListener("selectionchange", selectionHandler);
-
-        MessageActions = findByProps("sendMessage", "receiveMessage");
-        MessageStore = findByProps("getMessage", "getMessages");
-        const Toasts = findByProps("showToast", "createToast");
-        
-        if (MessageActions && MessageActions.sendMessage && MessageStore) {
-            origSendMessage = MessageActions.sendMessage;
-            
-            MessageActions.sendMessage = function(channelId: string, message: any, promise: any, options: any, ...rest: any[]) {
-                try {
-                    if (options && options.messageReference && options.messageReference.type === 1) {
-                        const sel = window.__multiForwardSelection;
-                        const forwardedMsgId = options.messageReference.message_id;
-                        
-                        if (sel) {
-                            // Check if the message the user clicked "Forward" on falls inside their highlighted block
-                            if (BigInt(forwardedMsgId) >= BigInt(sel.startId) && BigInt(forwardedMsgId) <= BigInt(sel.endId)) {
-                                
-                                const messagesObj = MessageStore.getMessages(sel.channelId);
-                                let msgArray: any[] = [];
-                                
-                                if (messagesObj) {
-                                    if (typeof messagesObj.toArray === "function") msgArray = messagesObj.toArray();
-                                    else if (Array.isArray(messagesObj)) msgArray = messagesObj;
-                                    else if (messagesObj._array) msgArray = messagesObj._array;
-                                }
-
-                                const idsToSend = msgArray
-                                    .filter(m => BigInt(m.id) >= BigInt(sel.startId) && BigInt(m.id) <= BigInt(sel.endId))
-                                    .map(m => m.id)
-                                    .sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : 1));
-                                
-                                if (idsToSend.length > 1) {
-                                    // Clear selection immediately so it doesn't accidentally loop
-                                    window.__multiForwardSelection = null;
-
-                                    if (Toasts && Toasts.showToast && Toasts.createToast) {
-                                        Toasts.showToast(Toasts.createToast(`Queuing ${idsToSend.length} messages...`, 0));
-                                    }
-
-                                    (async () => {
-                                        for (let i = 0; i < idsToSend.length; i++) {
-                                            const msgId = idsToSend[i];
-                                            
-                                            const newOptions = {
-                                                ...options,
-                                                messageReference: {
-                                                    ...options.messageReference,
-                                                    message_id: msgId,
-                                                    channel_id: sel.channelId
-                                                }
-                                            };
-                                            
-                                            const newMessage = { ...message };
-                                            delete newMessage.nonce; 
-                                            
-                                            if (i > 0 && newMessage.content) {
-                                                newMessage.content = ""; 
-                                            }
-
-                                            origSendMessage.call(this, channelId, newMessage, promise, newOptions, ...rest);
-                                            
-                                            if (i < idsToSend.length - 1) {
-                                                const base = Number(settings.store.baseDelay) || 2500;
-                                                const jitter = Number(settings.store.randomizeDelay) || 0;
-                                                const coolCount = Number(settings.store.cooldownCount) || 0;
-                                                const coolDelay = Number(settings.store.cooldownDelay) || 0;
-
-                                                const randomOffset = jitter > 0 ? Math.floor(Math.random() * (jitter * 2 + 1)) - jitter : 0;
-                                                let currentWaitTime = Math.max(0, base + randomOffset);
-
-                                                if (coolCount > 0 && (i + 1) % coolCount === 0) {
-                                                    currentWaitTime += coolDelay;
-                                                    
-                                                    if (Toasts && Toasts.showToast && Toasts.createToast) {
-                                                        Toasts.showToast(Toasts.createToast(`MultiForward: Rate Limit Pause for ${Math.round(currentWaitTime / 1000)}s...`, 2));
-                                                    }
-                                                }
-
-                                                await sleep(currentWaitTime); 
-                                            }
-                                        }
-                                        
-                                        if (Toasts && Toasts.showToast && Toasts.createToast) {
-                                            Toasts.showToast(Toasts.createToast(`Successfully forwarded ${idsToSend.length} messages!`, 1));
-                                        }
-                                    })();
-
-                                    return Promise.resolve();
-                                }
-                            }
-                        }
-                    }
-                } catch (e) {
-                    console.error("[MultiForward] Error in sendMessage interceptor:", e);
-                }
-                
-                return origSendMessage.apply(this, arguments);
-            };
-        } else {
-            console.error("[MultiForward] CRITICAL: Could not find MessageActions or MessageStore!");
+    flux: {
+        CHANNEL_SELECT() {
+            selectedRange = null;
+            preserveSelection = false;
         }
     },
 
     stop() {
-        if (selectionHandler) {
-            document.removeEventListener("selectionchange", selectionHandler);
-        }
-        if (MessageActions && origSendMessage) {
-            MessageActions.sendMessage = origSendMessage;
-        }
-        window.__multiForwardSelection = null;
+        lifecycle?.abort();
+        document.removeEventListener("selectionchange", selectionChanged);
+        document.removeEventListener("pointerdown", pointerDown, true);
+        document.removeEventListener("keydown", keyDown, true);
+        selectedRange = null;
+        preserveSelection = false;
+        lifecycle = undefined;
     }
 });

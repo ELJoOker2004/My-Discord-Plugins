@@ -4,19 +4,22 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import "./style.css";
+
 import { definePluginSettings, migratePluginSetting } from "@api/Settings";
 import { HeadingSecondary } from "@components/Heading";
 import { Paragraph } from "@components/Paragraph";
+import { EquicordDevs } from "@utils/constants";
 import { Logger } from "@utils/Logger";
 import definePlugin, { OptionType, type PluginNative, type PluginSettingBooleanDef, type PluginSettingComponentProps } from "@utils/types";
-import { findCssClassesLazy } from "@webpack";
-import { ApplicationStreamingStore, MediaEngineStore, React, showToast, StreamerModeStore, Toasts, UserStore } from "@webpack/common";
+import { ApplicationStreamingStore, MediaEngineStore, React, showToast, StreamerModeStore, UserStore } from "@webpack/common";
 
 import { matchesKeybind, validateKeybind } from "./keybind";
-import { createPrivacy } from "./privacy";
+import { configurePrivacy, PrivacyMask, PrivateRegion, setPrivacyActive, startPrivacy, stopPrivacy, usePrivacyState, usePrivateTitleProps } from "./privacy";
+import { portalContents, renderHost, startSurfaces, stopSurfaces } from "./surfaces";
 import { blurOptions } from "./targets";
 
-let privacy: ReturnType<typeof createPrivacy> | undefined;
+let started = false;
 let startingShare = false;
 let paused = false;
 let available = false;
@@ -24,11 +27,8 @@ let captureProtected = false;
 let activityState = "";
 let protectionGeneration = 0;
 let protectionTimer: ReturnType<typeof setTimeout> | undefined;
-let protectionMessage = "Ordinary masking. Hold the reveal key and hover to peek.";
 let lastError = "";
-const statusListeners = new Set<() => void>();
 const logger = new Logger("PrivateStreaming");
-const accountClasses = findCssClassesLazy("iconForeground", "accountPopoutButtonWrapper", "container");
 
 migratePluginSetting("PrivateStreaming", "protectWindow", "viewerOnly");
 
@@ -146,25 +146,21 @@ const settings = definePluginSettings({
 });
 
 function SettingsSection({ option }: PluginSettingComponentProps) {
-    return React.createElement("section", null,
-        React.createElement(HeadingSecondary, null, option.componentProps?.title),
-        React.createElement(Paragraph, null, option.componentProps?.description));
+    return (
+        <section>
+            <HeadingSecondary>{option.componentProps?.title}</HeadingSecondary>
+            <Paragraph>{option.componentProps?.description}</Paragraph>
+        </section>
+    );
 }
 
 function setProtectionMessage(message: string) {
-    protectionMessage = message;
-    for (const listener of statusListeners) listener();
-}
-
-function subscribeStatus(listener: () => void) {
-    statusListeners.add(listener);
-    return () => { statusListeners.delete(listener); };
+    usePrivacyState.setState({ protectionMessage: message });
 }
 
 function ProtectionStatus() {
-    const message = React.useSyncExternalStore(subscribeStatus, () => protectionMessage);
-    return React.createElement("div", null,
-        React.createElement(Paragraph, null, message));
+    const message = usePrivacyState(state => state.protectionMessage);
+    return <div><Paragraph>{message}</Paragraph></div>;
 }
 
 function failProtection(message: string) {
@@ -176,13 +172,13 @@ function failProtection(message: string) {
     if (lastError === message) return;
     lastError = message;
     logger.error(message);
-    showToast("Private Streaming: capture protection is unavailable. See plugin settings for details.", Toasts.Type.FAILURE);
+    showToast("Private Streaming: capture protection is unavailable. See plugin settings for details.", "failure");
 }
 
 function checkProtection(sharing: boolean, streamerMode: boolean) {
     const generation = ++protectionGeneration;
     clearTimeout(protectionTimer);
-    if (!privacy) return;
+    if (!started) return;
     const requested = settings.store.protectWindow && available;
     if (!requested) {
         captureProtected = false;
@@ -196,6 +192,7 @@ function checkProtection(sharing: boolean, streamerMode: boolean) {
     }
     const native = typeof VencordNative === "undefined" ? undefined
         : VencordNative.pluginHelpers.PrivateStreaming as PluginNative<typeof import("./native")> | undefined;
+    if (IS_WEB) return;
     if (!native?.getProtectionStatus) {
         if (requested) failProtection("Fully restart Discord to load the new capture protection helper.");
         return;
@@ -209,7 +206,7 @@ function checkProtection(sharing: boolean, streamerMode: boolean) {
     native.getProtectionStatus(sharing, streamerMode).then(result => {
         if (generation !== protectionGeneration) return;
         clearTimeout(protectionTimer);
-        if (result.version !== 5) {
+        if (result.version !== 6) {
             failProtection("Fully restart Discord to load the new capture protection helper.");
         } else if (!requested) {
             if (result.error) failProtection(result.error);
@@ -229,7 +226,7 @@ function checkProtection(sharing: boolean, streamerMode: boolean) {
 }
 
 function syncState() {
-    if (!privacy) return;
+    if (!started) return;
     const sharing = Boolean(ApplicationStreamingStore.getCurrentUserActiveStream())
         || MediaEngineStore.isScreenSharing() || MediaEngineStore.isScreenSharing("stream");
     if (sharing) startingShare = false;
@@ -250,7 +247,7 @@ function syncState() {
 }
 
 function applyMasking() {
-    privacy?.setActive(available && settings.store.blurEnabled && !paused && !captureProtected);
+    setPrivacyActive(available && settings.store.blurEnabled && !paused && !captureProtected);
 }
 
 function refreshProtection() {
@@ -263,7 +260,7 @@ function toggleMasking(event: KeyboardEvent) {
         event.preventDefault();
         event.stopImmediatePropagation();
         if (matchesKeybind(event, settings.store.toggleKeybind)) {
-            showToast("Choose different shortcuts for capture protection and blur in PrivateStreaming settings.", Toasts.Type.FAILURE);
+            showToast("Choose different shortcuts for capture protection and blur in PrivateStreaming settings.", "failure");
             return;
         }
         const protect = !settings.store.protectWindow;
@@ -271,7 +268,7 @@ function toggleMasking(event: KeyboardEvent) {
         settings.store.protectWindow = protect;
         showToast(!available
             ? (protect ? "Window hiding will activate with your chosen trigger." : "Window hiding is disabled.")
-            : protect ? "Hiding Discord from captures." : "Discord can appear in captures.", Toasts.Type.MESSAGE);
+            : protect ? "Hiding Discord from captures." : "Discord can appear in captures.");
         return;
     }
     if (captureProtected || !available || !settings.store.blurEnabled || !matchesKeybind(event, settings.store.toggleKeybind)) return;
@@ -282,31 +279,79 @@ function toggleMasking(event: KeyboardEvent) {
 }
 
 function configure() {
-    privacy?.configure(privacyOptions());
+    configurePrivacy(privacyOptions());
     if (!settings.store.protectWindow) captureProtected = false;
     syncState();
 }
 
 function privacyOptions() {
-    const { container } = accountClasses;
-    return {
-        ...settings.store,
-        accountPanelSelector: container ? `.${container.trim().split(/\s+/).map(name => CSS.escape(name)).join(".")}` : undefined
-    };
+    return { ...settings.store };
 }
 
 export default definePlugin({
     name: "PrivateStreaming",
     description: "Protects Discord windows from Windows screen capture, or blurs private content while sharing with Shift to peek.",
-    authors: [{ name: "ELJoOker", id: 605894319408283678n }],
-    requiresRestart: true,
+    authors: [EquicordDevs.ELJoOker],
     settings,
+    Mask: PrivacyMask,
+    Region: PrivateRegion,
+    usePrivateTitleProps,
+    renderHost,
+    portalContents,
+    patches: [
+        {
+            find: '.Fragment=Symbol.for("react.fragment"),',
+            replacement: {
+                match: /(\i)\.jsx=(\i),\1\.jsxs=\2/,
+                replace: "$1.jsx=$1.jsxs=(type,props,key)=>$self.renderHost(type,props,key,$2)"
+            }
+        },
+        {
+            find: ".createRef=function(){return{current:null}}",
+            replacement: {
+                match: /(?<=\.createElement=function\(\i,\i,\i\)\{.{0,500})return (\i)\((\i),(\i),(\i)\)(?=\},\i\.createRef=)/,
+                replace: "return $self.renderHost($2,$4,$3,$1,true)"
+            }
+        },
+        {
+            find: ".createPortal=function(",
+            replacement: {
+                match: /(\.createPortal=function\((\i),\i\)\{)/,
+                replace: "$1$2=$self.portalContents($2);"
+            }
+        },
+        {
+            find: '"data-window-chrome":"true"',
+            replacement: {
+                match: /(function \i\((\i)\)\{)(?=let\{(?=[^}]{0,150}\bleading:)(?=[^}]{0,150}\btitle:)(?=[^}]{0,150}\btrailing:))/,
+                replace: "$1$2=$self.windowTitleProps($2);"
+            }
+        },
+        {
+            find: ".flashQueue",
+            replacement: {
+                match: /(?<=\}\(\);)(?=\i\.useEffect\(\(\)=>\{let \i=(\i)===\i\.base;(\i)&&\i\|\|\(document\.title=\1\))/,
+                replace: "[$1,$2]=$self.usePrivateTitleProps($1,$2);"
+            }
+        }
+    ],
+
+    windowTitleProps(props: { title: React.ReactNode; }) {
+        if (props.title == null) return props;
+        return {
+            ...props,
+            title: <PrivateRegion area="hideWindowTitle"><PrivacyMask kind="hideWindowTitle">{props.title}</PrivacyMask></PrivateRegion>
+        };
+    },
 
     start() {
         this.stop();
+        started = true;
         window.addEventListener("keydown", toggleMasking, true);
         window.addEventListener("focus", refreshProtection);
-        privacy = createPrivacy(privacyOptions());
+        configurePrivacy(privacyOptions());
+        startSurfaces();
+        startPrivacy();
         ApplicationStreamingStore.addChangeListener(syncState);
         MediaEngineStore.addChangeListener(syncState);
         StreamerModeStore.addChangeListener(syncState);
@@ -322,15 +367,16 @@ export default definePlugin({
         captureProtected = false;
         lastError = "";
         activityState = "";
-        if (privacy && typeof VencordNative !== "undefined") {
+        if (started && typeof VencordNative !== "undefined") {
             const native = VencordNative.pluginHelpers.PrivateStreaming as PluginNative<typeof import("./native")> | undefined;
             native?.getProtectionStatus?.(false, false).catch(() => logger.error("Could not clear streaming activity."));
         }
         ApplicationStreamingStore.removeChangeListener(syncState);
         MediaEngineStore.removeChangeListener(syncState);
         StreamerModeStore.removeChangeListener(syncState);
-        privacy?.stop();
-        privacy = undefined;
+        stopPrivacy();
+        stopSurfaces();
+        started = false;
         startingShare = false;
         paused = available = false;
     },

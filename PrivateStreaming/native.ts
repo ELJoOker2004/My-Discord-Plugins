@@ -4,10 +4,9 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { release } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 
 import { RendererSettings } from "@main/settings";
 import { app, BrowserWindow, IpcMainInvokeEvent } from "electron";
@@ -17,7 +16,25 @@ const errors = new Map<BrowserWindow, string>();
 const cleanup = new WeakSet<BrowserWindow>();
 const activity = new Map<BrowserWindow, { sharing: boolean; streamerMode: boolean; }>();
 const supported = process.platform === "win32" && Number(release().split(".")[2]) >= 19041;
-const execute = promisify(execFile);
+
+function readAffinity(script: string) {
+    return new Promise<number>((resolve, reject) => {
+        const child = spawn(join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+            ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+            { windowsHide: true, timeout: 4000, stdio: ["ignore", "pipe", "ignore"] });
+        let output = "";
+        child.stdout.setEncoding("utf8");
+        child.stdout.on("data", (chunk: string) => {
+            output += chunk;
+            if (output.length > 4096) child.kill();
+        });
+        child.once("error", reject);
+        child.once("close", code => {
+            if (code !== 0 || output.length > 4096) reject(new Error("Capture verification failed."));
+            else resolve(Number(output.trim()));
+        });
+    });
+}
 
 function enabled() {
     const options = RendererSettings.store.plugins?.PrivateStreaming;
@@ -30,6 +47,8 @@ function enabled() {
 function watchWindow(window: BrowserWindow) {
     if (cleanup.has(window)) return;
     cleanup.add(window);
+    window.on("show", synchronize);
+    window.once("ready-to-show", synchronize);
     window.once("closed", () => {
         originals.delete(window);
         errors.delete(window);
@@ -75,11 +94,11 @@ synchronize();
 export async function getProtectionStatus(event: IpcMainInvokeEvent, sharing?: boolean, streamerMode?: boolean) {
     const owner = BrowserWindow.fromWebContents(event.sender);
     if (!owner || owner.isDestroyed() || event.senderFrame !== event.sender.mainFrame) {
-        return { version: 5, enabled: false, protected: false, error: "Capture protection is available only from a Discord window." };
+        return { version: 6, enabled: false, protected: false, error: "Capture protection is available only from a Discord window." };
     }
     if (sharing !== undefined || streamerMode !== undefined) {
         if (typeof sharing !== "boolean" || typeof streamerMode !== "boolean")
-            return { version: 5, enabled: false, protected: false, error: "Invalid streaming activity." };
+            return { version: 6, enabled: false, protected: false, error: "Invalid streaming activity." };
         watchWindow(owner);
         activity.set(owner, { sharing, streamerMode });
     }
@@ -92,17 +111,14 @@ export async function getProtectionStatus(event: IpcMainInvokeEvent, sharing?: b
         const hwnd = handle.length === 8 ? handle.readBigUInt64LE().toString() : handle.readUInt32LE().toString();
         const script = `$ErrorActionPreference='Stop'; Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class WindowCapture { [DllImport("user32.dll", SetLastError=true)] public static extern bool GetWindowDisplayAffinity(IntPtr hwnd, out uint affinity); }'; [uint32]$affinity=0; if (-not [WindowCapture]::GetWindowDisplayAffinity([IntPtr]${hwnd}, [ref]$affinity)) { throw 'Could not read capture protection.' }; $affinity`;
         try {
-            const { stdout } = await execute(join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-                ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
-                { windowsHide: true, timeout: 4000, maxBuffer: 4096 });
-            protectedByWindows = Number(stdout.trim()) === 0x11;
+            protectedByWindows = await readAffinity(script) === 0x11;
             if (!protectedByWindows) error = "Windows did not confirm capture exclusion for this Discord window. This Electron build may not support it correctly.";
         } catch {
             error = "Could not verify Windows capture protection. Ordinary blur remains available.";
         }
     }
     return {
-        version: 5,
+        version: 6,
         enabled: enabled(),
         protected: enabled() && !owner.isDestroyed() && owner.isContentProtected() && protectedByWindows,
         error

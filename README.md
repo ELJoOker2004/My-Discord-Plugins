@@ -37,9 +37,13 @@ Choose which content to mask: names, avatars, messages, photos, stickers, videos
 
 Shortcuts work while Discord is focused. Both toggle shortcuts can be changed or disabled, and the reveal key is configurable. To share a blurred Discord window, turn off **Hide Discord windows** in the plugin settings and leave **Enable blur** enabled. Check the result with your capture tool, since window exclusion depends on its support for Windows capture protection.
 
+Masking uses React components and webpack patches, with Discord's classes resolved through Equicord's webpack utilities. Changing content, releasing the reveal key, scrolling, losing focus, or using a screenshot shortcut cancels a peek. The plugin does not send messages or use external services, API keys, or extra dependencies.
+
+See the [implementation and validation notes](./PrivateStreaming/README.md) for the tested behavior and remaining checks before an Equicord submission. Maintainer acceptance is pending.
+
 ## Installation
 
-1. Copy the desired plugin folder into your Vencord/Equicord source checkout's `src/userplugins` directory. Copy the entire folder, including any native helper files.
+1. Copy all files from the desired plugin folder into a camelCase folder in your Vencord/Equicord source checkout's `src/userplugins` directory, such as `src/userplugins/privateStreaming`. Include the native helper and stylesheet files.
 2. Rebuild your client mod using its build instructions.
 3. Fully restart Discord, enable the plugin in your client mod's plugin settings, and restart again if prompted.
 
